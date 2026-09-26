@@ -13,10 +13,13 @@ set -euo pipefail
 # Resolved from the script itself, so the repository works wherever it is cloned
 VM_DIR="${OMAVM_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
 VM_BIN="$VM_DIR/bin"
+# OMAVM_NAME runs a second VM next to the default one: its own unit, disk,
+# OVMF vars and QMP socket. Give it its own OMAVM_SSH_PORT as well.
+NAME="${OMAVM_NAME:+-$OMAVM_NAME}"
 # The active disk lives on real disk, not /tmp: /tmp is tmpfs, so a multi-GB
 # qcow2 there is held entirely in RAM and starves the host (oom-kills the VM).
-ACTIVE_DISK="${OMARCHY_VM_DISK:-/var/tmp/omarchy-iso-boot.qcow2}"
-OVMF_VARS="${OMARCHY_VM_OVMF_VARS:-/var/tmp/OVMF_VARS.4m.fd}"
+ACTIVE_DISK="${OMARCHY_VM_DISK:-/var/tmp/omarchy-iso-boot$NAME.qcow2}"
+OVMF_VARS="${OMARCHY_VM_OVMF_VARS:-/var/tmp/OVMF_VARS$NAME.4m.fd}"
 VM_MEM="${OMAVM_MEM:-}" # MB; empty keeps omarchy-iso-boot's default (8192)
 # Let child omarchy-vm/omarchy-iso-boot calls use the same paths we do
 export OMARCHY_VM_DISK="$ACTIVE_DISK" OMARCHY_VM_OVMF_VARS="$OVMF_VARS"
@@ -24,10 +27,10 @@ SSH_PORT="${OMAVM_SSH_PORT:-2222}"
 # QMP control socket. Lets us photograph the guest's screen and press keys in
 # it without touching the host desktop, which matters while the guest has no
 # SSH yet (installing, or stuck on a boot prompt).
-QMP_SOCK="${OMAVM_QMP_SOCK:-${XDG_RUNTIME_DIR:-/run/user/$UID}/omavm-qmp.sock}"
+QMP_SOCK="${OMAVM_QMP_SOCK:-${XDG_RUNTIME_DIR:-/run/user/$UID}/omavm$NAME-qmp.sock}"
 GUEST_USER="${OMAVM_USER:-$USER}"
 GUEST_UID=1000
-UNIT="omarchy-vm.service"
+UNIT="omarchy-vm$NAME.service"
 SHELL_QML="/usr/share/omarchy/shell/shell.qml"
 
 # Unattended install settings. The guest deliberately has no disk encryption:
@@ -210,6 +213,7 @@ cmd_boot() {
   systemd-run --user --unit="${UNIT%.service}" --collect \
     --setenv=OMARCHY_VM_DISK="$ACTIVE_DISK" \
     --setenv=OMARCHY_VM_OVMF_VARS="$OVMF_VARS" \
+    --setenv=OMARCHY_VM_SSH_PORT="$SSH_PORT" \
     --setenv=OMARCHY_VM_GL="${OMARCHY_VM_GL:-1}" \
     "$VM_BIN/omarchy-iso-boot" --reuse /dev/null "${extra[@]}" >/dev/null
   echo "Booting snapshot '$snapshot'${VM_MEM:+ with ${VM_MEM}MB RAM} (QEMU window appears on the desktop)"
@@ -231,6 +235,7 @@ cmd_resume() {
   systemd-run --user --unit="${UNIT%.service}" --collect \
     --setenv=OMARCHY_VM_DISK="$ACTIVE_DISK" \
     --setenv=OMARCHY_VM_OVMF_VARS="$OVMF_VARS" \
+    --setenv=OMARCHY_VM_SSH_PORT="$SSH_PORT" \
     --setenv=OMARCHY_VM_GL="${OMARCHY_VM_GL:-1}" \
     "$VM_BIN/omarchy-iso-boot" --reuse /dev/null "${extra[@]}" >/dev/null
   echo "Resuming from the existing active disk"
@@ -579,6 +584,7 @@ cmd_install() {
   systemd-run --user --unit="${UNIT%.service}" --collect \
     --setenv=OMARCHY_VM_DISK="$ACTIVE_DISK" \
     --setenv=OMARCHY_VM_OVMF_VARS="$OVMF_VARS" \
+    --setenv=OMARCHY_VM_SSH_PORT="$SSH_PORT" \
     --setenv=OMARCHY_VM_GL=0 \
     "$VM_BIN/omarchy-iso-boot" --reuse "$ISO" \
     -- -drive "file=$cidata,format=raw,if=none,id=cidata" \

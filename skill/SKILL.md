@@ -97,6 +97,18 @@ omavm user 'wl-paste'      # any command as the guest user, with session env
 
 Synthetic input *inside the guest session* (ydotool, wtype) does not work, so testable behaviour goes through the plugin's IPC methods. `omavm sendkey` is a different thing and does work: it enters the virtual machine at the QEMU level rather than through the guest's compositor. Good for keys that land at a tty or a prompt, not a replacement for a real IPC test.
 
+## A second VM next to the default one
+
+The user often has the default VM open for his own work. For anything he did not ask to do in that one, run your own next to it: `OMAVM_NAME` gives it its own unit, disk, OVMF vars and QMP socket, and `OMAVM_SSH_PORT` its own port.
+
+```bash
+export OMAVM_NAME=review OMAVM_SSH_PORT=2223
+omavm status      # must say omarchy-vm-review.service and port 2223
+omavm boot
+```
+
+Set both variables in every command; without them omavm talks to the default VM. Stop your VM when you are done.
+
 ## Snapshots
 
 `omavm save <name>` refuses while the VM is running: stop it first, then save, then boot again if needed. Overwriting an existing snapshot needs `--force`. Never overwrite `fresh` unasked.
