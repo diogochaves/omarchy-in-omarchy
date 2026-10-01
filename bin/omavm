@@ -40,6 +40,10 @@ ISO="${OMAVM_ISO:-$HOME/Downloads/omarchy-4.0.3.iso}"
 GUEST_PASSWORD="${OMAVM_PASSWORD:-omarchy}"
 GUEST_HOSTNAME="${OMAVM_HOSTNAME:-omarchy-vm}"
 GUEST_TIMEZONE="${OMAVM_TIMEZONE:-Europe/Amsterdam}"
+# Empty leaves the kernel to the ISO, which knows what it carries: up to 4.0.3
+# that is stock linux, from 4.0.4 linux-omarchy, and 4.0.4 refuses to finish
+# an install whose kernel has no headers on the ISO.
+GUEST_KERNEL="${OMAVM_KERNEL:-}"
 # Git identity for the guest; taken from yours so a fresh VM commits as you.
 GUEST_FULL_NAME="${OMAVM_FULL_NAME:-$(git config --global user.name 2>/dev/null || echo "$USER")}"
 GUEST_EMAIL="${OMAVM_EMAIL:-$(git config --global user.email 2>/dev/null || echo "$USER@localhost")}"
@@ -547,6 +551,14 @@ build_cidata() {
   local main_start=$((boot_size + boot_start))
   local main_size=$((disk_bytes - main_start - mib)) # minus the GPT backup reserve
 
+  # Without a kernel named here the installer picks its own default; naming
+  # one has to happen in both places it is read from.
+  local kernels="" storage="{}"
+  if [[ -n $GUEST_KERNEL ]]; then
+    kernels="\"kernels\": [ \"$GUEST_KERNEL\" ],"
+    storage="{ \"kernel\": \"$GUEST_KERNEL\" }"
+  fi
+
   cat >"$dir/user_credentials.json" <<EOF
 {
     "root_enc_password": $(jq -Rn --arg v "$hash" '$v'),
@@ -579,7 +591,7 @@ EOF
             "efi_binary": "limine_x64.efi",
             "enable_fallback": true
         },
-        "storage": { "kernel": "linux" }
+        "storage": $storage
     },
     "disk_config": {
         "config_type": "default_layout",
@@ -624,7 +636,7 @@ EOF
         ]
     },
     "hostname": "$GUEST_HOSTNAME",
-    "kernels": [ "linux" ],
+    $kernels
     "network_config": { "type": "iso" },
     "ntp": true,
     "parallel_downloads": 8,
