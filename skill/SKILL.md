@@ -68,7 +68,7 @@ The agent has to be unlocked on the host, otherwise omavm reports that it offers
 
 ## Rebuilding the snapshot
 
-`omavm install` does a full unattended install from the ISO. It builds a cidata drive (the cloud-init `NoCloud` convention: the Omarchy installer takes its answers from a drive labelled `CIDATA` and skips the wizard) with no `disk_encryption` block, waits for the guest to reboot into the installed system on its own, and then runs `omavm provision`: root key, passwordless sudo, idle toggles, stow and the dotfiles (skipped when `~/dotfiles`, or `OMAVM_DOTFILES_REPO`, is not a git repo). Needs `mtools` on the host for `mcopy`.
+`omavm install` does a full unattended install from the ISO. It builds a cidata drive (the cloud-init `NoCloud` convention: the Omarchy installer takes its answers from a drive labelled `CIDATA` and skips the wizard) with no `disk_encryption` block, waits for the guest to reboot into the installed system on its own, and then runs `omavm provision`: root key, passwordless sudo, idle toggles, a package database sync, and stow plus the dotfiles (skipped when `~/dotfiles`, or `OMAVM_DOTFILES_REPO`, is not a git repo). Needs `mtools` on the host for `mcopy`.
 
 ```bash
 omavm install

@@ -79,10 +79,11 @@ Building the machine (rarely; "fresh" is already built):
                        straight into Hyprland. Runs provision afterwards.
                        Save the result with: omavm stop && omavm save fresh
   provision            Re-run the post-install steps on a running VM: root SSH
-                       key, passwordless sudo, stow, and the dotfiles when
-                       there is a repo for them (OMAVM_DOTFILES_REPO, default
-                       ~/dotfiles).
-  dotfiles             Re-copy the host dotfiles into the guest and stow them.
+                       key, passwordless sudo, pacman -Sy, and the dotfiles
+                       when there is a repo for them (OMAVM_DOTFILES_REPO,
+                       default ~/dotfiles).
+  dotfiles             Re-copy the host dotfiles into the guest and stow them
+                       (installs stow first).
 
 VM lifecycle:
   boot [snapshot]      Boot a clean VM from a snapshot (default: fresh). Its
@@ -771,9 +772,6 @@ Session=hyprland-uwsm.desktop
 Relogin=true
 EOF"
 
-  # A fresh install has empty package databases: everything came from the
-  # mirror bundled on the ISO, so pacman has never synced. Without -Sy the
-  # install below fails with "target not found".
   # A test VM should never dim, lock or start a screensaver: that costs a
   # password prompt on a machine meant to need none, and a blanked screen also
   # hangs the grim screenshot in "omavm shot". Both toggles take an explicit
@@ -784,10 +782,25 @@ EOF"
     omarchy-toggle-idle stay-awake >/dev/null'" ||
     echo "omavm: could not set the idle toggles (old Omarchy?)" >&2
 
-  echo "Syncing package databases and installing stow"
-  if ! vmssh "pacman -Sy --noconfirm >/dev/null 2>&1 && \
-              pacman -S --needed --noconfirm stow >/dev/null 2>&1"; then
-    echo "omavm: could not install stow in the guest; dotfiles stay unstowed." >&2
+  # A fresh install has empty package databases: everything came from the
+  # mirror bundled on the ISO, so pacman has never synced, and any install
+  # fails with "target not found". This runs seconds after the first boot and
+  # has failed there once for no reason it kept, so it gets a few tries, and
+  # pacman's own words when it still fails. Still a failure then: a snapshot
+  # saved with unsynced databases fails every later install in the guest.
+  echo "Syncing package databases"
+  local out="" try synced=0
+  for try in 1 2 3; do
+    if out=$(vmssh "pacman -Sy --noconfirm" 2>&1); then
+      synced=1
+      break
+    fi
+    ((try < 3)) && sleep 5
+  done
+  if ((!synced)); then
+    echo "omavm: pacman -Sy failed in the guest:" >&2
+    tail -n 5 <<<"$out" >&2
+    echo "Run 'omavm provision' again once that is resolved." >&2
     return 1
   fi
 
@@ -809,7 +822,17 @@ cmd_dotfiles() {
     echo "omavm: no git repo at $DOTFILES_REPO" >&2
     exit 1
   fi
-  local staging
+  local staging out
+
+  # Here rather than in provision, so a VM provisioned without dotfiles can
+  # still take them later.
+  echo "Installing stow"
+  if ! out=$(vmssh "pacman -S --needed --noconfirm stow" 2>&1); then
+    echo "omavm: could not install stow in the guest; dotfiles stay unstowed:" >&2
+    tail -n 5 <<<"$out" >&2
+    return 1
+  fi
+
   staging=$(mktemp -d)
 
   echo "Cloning the dotfiles into the guest (tracked files only)"
