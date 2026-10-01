@@ -637,9 +637,18 @@ cmd_provision() {
   # writes a plain "ALL" rule, and against that "sudo -v" still demands a
   # password. omarchy-update runs exactly that, so it would stop and ask on a
   # machine meant to need no typing. !authenticate covers the validation too.
+  #
+  # Only the first run needs that password line. Once the sudoers drop-in below
+  # is in place sudo asks for nothing and leaves the line unread, and bash then
+  # runs the password itself as the first command of the script. So ask sudo
+  # first whether it still wants one.
   echo "Opening the root SSH path and enabling passwordless sudo"
+  local needs_password=1
+  usermssh "sudo -n true" 2>/dev/null && needs_password=0
   {
-    echo "$GUEST_PASSWORD"
+    if ((needs_password)); then
+      echo "$GUEST_PASSWORD"
+    fi
     cat <<PROVISION
 set -e
 mkdir -p /root/.ssh
