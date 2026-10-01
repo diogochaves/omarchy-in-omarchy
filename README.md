@@ -19,7 +19,7 @@ omavm stop
 
 ## Requirements
 
-Arch or Omarchy on the host, with libvirt and an Omarchy ISO from [iso.omarchy.org](https://iso.omarchy.org). KVM, 8 cores, 8 GB RAM and 40 GB of disk go to the guest by default (`OMAVM_CPUS`, `OMAVM_MEM`).
+Arch or Omarchy on the host, with libvirt and an Omarchy ISO from [iso.omarchy.org](https://iso.omarchy.org): `omavm install` takes the newest `omarchy-*.iso` in `~/Downloads`, or the one `OMAVM_ISO` points at. KVM, 8 cores, 8 GB RAM and 40 GB of disk go to the guest by default (`OMAVM_CPUS`, `OMAVM_MEM`).
 
 Setting up libvirt takes one round of sudo:
 
