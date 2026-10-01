@@ -37,7 +37,7 @@ With `ufw` active, also let the VMs through: `sudo ufw allow in on virbr0` and `
 
 ## The unattended install
 
-The shipped Omarchy ISO can install itself without a keyboard: it looks for a drive labelled `CIDATA` (the cloud-init NoCloud convention) holding archinstall's own answer files, and if it finds one it skips the configurator entirely. `omavm install` builds that drive, boots the ISO with it attached, waits for the installed system to come up and then provisions it.
+The shipped Omarchy ISO can install itself without a keyboard: it looks for a drive labelled `CIDATA` (the cloud-init NoCloud convention) holding archinstall's own answer files, and if it finds one it skips the configurator entirely. `omavm install` builds that drive, boots the ISO with it attached, waits for the installed system to come up and then provisions it. Provisioning ends by cloning your dotfiles repository into the guest and stowing the packages in `OMAVM_DOTFILES_PACKAGES`; without a git repository at `~/dotfiles` (or `OMAVM_DOTFILES_REPO`) that step is skipped.
 
 Two files are mandatory on that drive, `user_configuration.json` and `user_credentials.json`; the optional ones cover the git identity, SSH keys and a Tailscale auth key. See the [omarchy-iso README](https://github.com/omacom-io/omarchy-iso#autoinstall) for the full list.
 

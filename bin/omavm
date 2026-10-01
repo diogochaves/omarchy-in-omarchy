@@ -79,7 +79,9 @@ Building the machine (rarely; "fresh" is already built):
                        straight into Hyprland. Runs provision afterwards.
                        Save the result with: omavm stop && omavm save fresh
   provision            Re-run the post-install steps on a running VM: root SSH
-                       key, passwordless sudo, stow, dotfiles.
+                       key, passwordless sudo, stow, and the dotfiles when
+                       there is a repo for them (OMAVM_DOTFILES_REPO, default
+                       ~/dotfiles).
   dotfiles             Re-copy the host dotfiles into the guest and stow them.
 
 VM lifecycle:
@@ -789,6 +791,12 @@ EOF"
     return 1
   fi
 
+  # The dotfiles are one person's setup, not part of the machine: without a
+  # repo there is nothing to stow, and no reason to call the install failed.
+  if [[ ! -d "$DOTFILES_REPO/.git" ]]; then
+    echo "No dotfiles repo at $DOTFILES_REPO; skipping the dotfiles"
+    return 0
+  fi
   cmd_dotfiles
 }
 
