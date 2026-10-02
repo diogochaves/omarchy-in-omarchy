@@ -1,6 +1,6 @@
 # Omarchy-in-Omarchy
 
-A disposable [Omarchy](https://omarchy.org) machine running in QEMU/KVM on your Omarchy desktop, for testing plugins, themes and system changes without touching the machine you actually work on. Everything in it may break: the `fresh` snapshot stays clean and a new VM is one command.
+A disposable [Omarchy](https://omarchy.org) machine running under libvirt (QEMU/KVM) on your Omarchy desktop, for testing plugins, themes and system changes without touching the machine you actually work on. Everything in it may break: the `fresh` snapshot stays clean and a new VM is one command.
 
 ![Omarchy running inside a QEMU window on an Omarchy desktop, with fastfetch reporting KVM/QEMU](docs/social-preview.png)
 
@@ -10,15 +10,30 @@ The interesting part is that the guest installs itself and boots straight into H
 omavm install                    # unattended install from the ISO, ~30 min, once
 omavm stop && omavm save fresh   # keep the result as the clean baseline
 
-omavm boot                       # ~18 seconds to a running desktop
+omavm boot                       # ~18 seconds to a running desktop, no window
 omavm ssh 'uname -a'             # run something as root in the guest
 omavm shot screen.png            # screenshot of the guest desktop
+omavm view                       # look at it yourself
 omavm stop
 ```
 
 ## Requirements
 
-Arch or Omarchy on the host, with `qemu-full`, `edk2-ovmf` and `mtools`. An Omarchy ISO from [iso.omarchy.org](https://iso.omarchy.org). KVM, 8 cores, 8 GB RAM and 40 GB of disk go to the guest by default.
+Arch or Omarchy on the host, with libvirt and an Omarchy ISO from [iso.omarchy.org](https://iso.omarchy.org). KVM, 8 cores, 8 GB RAM and 40 GB of disk go to the guest by default (`OMAVM_CPUS`, `OMAVM_MEM`).
+
+Setting up libvirt takes one round of sudo:
+
+```bash
+sudo pacman -S --needed libvirt virt-install virt-viewer dnsmasq qemu-desktop edk2-ovmf mtools
+sudo systemctl enable --now libvirtd.socket
+# let your user manage qemu:///system without a password prompt
+echo 'polkit.addRule(function(a, s) { if (a.id == "org.libvirt.unix.manage" && s.user == "'$USER'") return polkit.Result.YES; });' |
+  sudo tee /etc/polkit-1/rules.d/50-libvirt-$USER.rules
+sudo virsh net-autostart default && sudo virsh net-start default
+sudo install -d -o $USER -g libvirt -m 2775 /var/lib/libvirt/images/omavm
+```
+
+With `ufw` active, also let the VMs through: `sudo ufw allow in on virbr0` and `sudo ufw route allow in on virbr0`.
 
 ## The unattended install
 
@@ -66,9 +81,21 @@ The guest can ask the agent to sign, never to hand a key over, and that access d
 
 The same principle covers tokens: fetch them on the host and pass them as an environment variable on a single command, rather than writing them to a file in the guest.
 
+## libvirt, and no window
+
+Every VM is a libvirt domain on `qemu:///system`: `omavm` itself, or `omavm-<name>` for a second one (`OMAVM_NAME=review omavm boot`). That gives three things for free:
+
+- **No window.** A VM runs in the background, so booting one for a test or for an agent puts nothing on your desktop. `omavm view` opens its screen in `virt-viewer`, and closing the viewer leaves the VM running.
+- **It shows up everywhere.** Anything that lists libvirt machines sees it, with start, stop and console: `virsh list`, virt-manager, or a VM panel in the bar.
+- **Booting copies nothing.** A VM's disk is a thin qcow2 overlay on the snapshot it came from, so `omavm boot` starts in seconds and a fresh VM takes a few megabytes until it starts writing.
+
+The guest gets its address from libvirt's `default` NAT network, and omavm finds it in the DHCP leases (`omavm ip`). It renders at 1920x1200 (`OMAVM_RES`) on plain virtio video without GPU acceleration, so libvirt can always photograph its screen.
+
+`omavm create <name>` boots a named VM and prints `<domain><TAB><ip>`, for scripts that want a machine and an address and nothing else.
+
 ## Looking at a guest that has no SSH yet
 
-While the guest is installing or stuck at a prompt there is nothing to SSH into, and grabbing the QEMU window means going to whatever workspace it happens to be on. `omavm screendump` and `omavm sendkey` go through QEMU's QMP socket instead, so they need no cooperation from the guest and never touch the host desktop.
+While the guest is installing or stuck at a prompt there is nothing to SSH into. `omavm screendump` (`virsh screenshot`) and `omavm sendkey` (QEMU's monitor, through libvirt) need no cooperation from the guest and never touch the host desktop.
 
 ```bash
 omavm screendump screen.png
@@ -76,7 +103,7 @@ omavm sendkey ret
 omavm sendkey ctrl-alt-f2
 ```
 
-`screendump` needs a software framebuffer, which GPU acceleration removes: with `virtio-vga-gl` QEMU answers `no surface`, and it refuses a second display outright with `Display vnc is incompatible with the GL context`. So `omavm install` runs the guest without acceleration, where seeing the screen matters more than speed, and `OMARCHY_VM_GL=0 omavm boot` does the same for a normal boot. `sendkey` always works.
+`screendump` needs a software framebuffer, which GPU acceleration removes: with `virtio-vga-gl` QEMU answers `no surface`. That is why the guest runs without acceleration; seeing the screen from a script matters more here than smooth animations.
 
 Once the guest has a session, `omavm shot` is the better screenshot: it runs `grim` inside the guest, so it comes out sharp and correctly scaled.
 
@@ -87,20 +114,20 @@ Run `omavm --help` for the full reference.
 | | |
 |---|---|
 | `install`, `provision`, `dotfiles` | Build the machine; provision and dotfiles can be re-run against a running guest |
-| `boot`, `resume`, `stop`, `status` | Lifecycle. `boot` starts clean from a snapshot, `resume` continues the active disk |
-| `save`, `list` | Snapshots, in `vm-saves/`. Overwriting one needs `--force` |
-| `ssh`, `user`, `agent`, `push`, `pull` | Work in the guest |
-| `shot`, `screendump`, `sendkey` | See and drive the screen |
+| `boot`, `create`, `resume`, `stop`, `destroy`, `status` | Lifecycle. `boot` starts clean from a snapshot, `resume` continues the VM's own disk, `destroy` removes it |
+| `save`, `list` | Snapshots, in `/var/lib/libvirt/images/omavm/snapshots`. Overwriting one needs `--force`, and is refused while a VM still builds on it |
+| `ssh`, `user`, `agent`, `push`, `pull`, `ip` | Work in the guest |
+| `view`, `shot`, `screendump`, `sendkey` | See and drive the screen |
 | `hypr`, `qs`, `restart-shell`, `plugin` | Hyprland, Quickshell and plugin testing |
 
 ## Gotchas
 
-- Keep the active disk off `/tmp`. That is tmpfs, so a multi-gigabyte qcow2 lives entirely in RAM and starves the host until the OOM killer takes the VM. This uses `/var/tmp`, which a reboot still clears, so snapshots are what survives.
-- Start QEMU in a systemd user unit rather than as a child of your shell, or the window vanishes the moment that session ends. `omavm` does this for you.
+- The disks live in libvirt's images directory, because the qemu that libvirt starts runs as its own user and has to read them. A disk in your home directory gives a permission error at boot.
+- Never overwrite a snapshot that a VM's overlay builds on: the overlay only stores differences, so it would silently turn into garbage. `omavm save` refuses.
 - Snapshot only a powered-off VM. Copying a live disk gives you an inconsistent image.
 - A blanked guest screen hangs `grim` forever instead of failing, so `omavm shot` appears to freeze. `provision` therefore disables the screensaver and keeps the screen awake.
 - A fresh install has empty pacman databases, because everything came from the mirror bundled on the ISO. Anything you install afterwards needs a `pacman -Sy` first.
-- Clipboard sharing does not work with the SDL display. Use `omavm push` and `omavm pull`, or reach the host at `10.0.2.2` from inside the guest.
+- Moving files: `omavm push` and `omavm pull`. From inside the guest the host is the default network's gateway, `192.168.122.1`.
 - Hyprland in the guest is Quattro, so `hyprctl dispatch` takes lua: `hl.dsp.focus({ workspace = 2 })`.
 
 ## Using it with an agent
@@ -114,10 +141,14 @@ ln -s "$PWD/skill" ~/.claude/skills/vm
 
 ## Credits
 
-`bin/omarchy-iso-boot` and `bin/omarchy-vm` come from [omacom-io/omarchy-iso](https://github.com/omacom-io/omarchy-iso) and carry small local patches: an `OMARCHY_VM_GL=0` switch to trade GPU acceleration for a readable framebuffer, and a path fix so `omarchy-vm` calls its neighbour rather than searching `PATH`. `bin/omavm` is the wrapper around them.
+The unattended install builds on how [omacom-io/omarchy-iso](https://github.com/omacom-io/omarchy-iso) installs itself from a `CIDATA` drive. Earlier versions of omavm ran QEMU through that repository's `omarchy-iso-boot`; it now runs everything through libvirt.
 
 This whole thing started with [DHH answering a question about it](https://x.com/dhh/status/2094856301662835158) on 1 September 2026:
 
 > You can use QEMU. Talk to your agent about it 😄. Tell it to look at omarchy-iso-boot in omacom/omarchy-iso.
 
 So that is what happened, and this repository is where that conversation ended up.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

@@ -1,36 +1,35 @@
 #!/bin/bash
 #
-# omavm - drive the disposable Omarchy test VM (QEMU/KVM) from one command.
+# omavm - drive the disposable Omarchy test VM from one command.
 #
-# The VM boots from snapshots in vm-saves/ in this repository, found next to
-# this script's own bin/ directory (see the README). This script wraps
-# booting, SSH, file transfer, screenshots, Hyprland/quickshell access and
-# plugin installs so nothing has to remember the env-var and gum-confirm
-# pitfalls.
+# Every VM is a libvirt domain on qemu:///system, so it runs without a window,
+# shows up in anything that lists libvirt machines (the bar's VM panel,
+# virt-manager) and opens in virt-viewer when you want to look at it. A VM's
+# disk is a thin overlay on a snapshot, so booting a clean one copies nothing.
+# This script wraps booting, SSH, file transfer, screenshots, Hyprland and
+# quickshell access and plugin installs so nothing has to remember the
+# env-var and gum-confirm pitfalls.
 
 set -euo pipefail
 
-# Resolved from the script itself, so the repository works wherever it is cloned
-VM_DIR="${OMAVM_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
-VM_BIN="$VM_DIR/bin"
-# OMAVM_NAME runs a second VM next to the default one: its own unit, disk,
-# OVMF vars and QMP socket. Give it its own OMAVM_SSH_PORT as well.
+# libvirt's own images directory, so the qemu that libvirt starts can read the
+# disks. Create it once (see the README); everything after that runs as you.
+IMAGES_DIR="${OMAVM_IMAGES_DIR:-/var/lib/libvirt/images/omavm}"
+SNAPSHOTS_DIR="$IMAGES_DIR/snapshots"
+# OMAVM_NAME runs a second VM next to the default one: its own domain, disk
+# and firmware vars.
 NAME="${OMAVM_NAME:+-$OMAVM_NAME}"
-# The active disk lives on real disk, not /tmp: /tmp is tmpfs, so a multi-GB
-# qcow2 there is held entirely in RAM and starves the host (oom-kills the VM).
-ACTIVE_DISK="${OMARCHY_VM_DISK:-/var/tmp/omarchy-iso-boot$NAME.qcow2}"
-OVMF_VARS="${OMARCHY_VM_OVMF_VARS:-/var/tmp/OVMF_VARS$NAME.4m.fd}"
-VM_MEM="${OMAVM_MEM:-}" # MB; empty keeps omarchy-iso-boot's default (8192)
-# Let child omarchy-vm/omarchy-iso-boot calls use the same paths we do
-export OMARCHY_VM_DISK="$ACTIVE_DISK" OMARCHY_VM_OVMF_VARS="$OVMF_VARS"
-SSH_PORT="${OMAVM_SSH_PORT:-2222}"
-# QMP control socket. Lets us photograph the guest's screen and press keys in
-# it without touching the host desktop, which matters while the guest has no
-# SSH yet (installing, or stuck on a boot prompt).
-QMP_SOCK="${OMAVM_QMP_SOCK:-${XDG_RUNTIME_DIR:-/run/user/$UID}/omavm$NAME-qmp.sock}"
+DOMAIN="omavm$NAME"
+DISK="$IMAGES_DIR/$DOMAIN.qcow2"
+VARS="$IMAGES_DIR/$DOMAIN-vars.fd"
+VM_MEM="${OMAVM_MEM:-8192}"  # MB
+VM_CPUS="${OMAVM_CPUS:-8}"
+# There is no window for the guest to take its size from, so it gets one.
+VM_RES="${OMAVM_RES:-1920x1200}"
+OVMF_CODE=/usr/share/edk2/x64/OVMF_CODE.4m.fd
+VIRSH=(virsh -c qemu:///system)
 GUEST_USER="${OMAVM_USER:-$USER}"
 GUEST_UID=1000
-UNIT="omarchy-vm$NAME.service"
 SHELL_QML="/usr/share/omarchy/shell/shell.qml"
 
 # Unattended install settings. The guest deliberately has no disk encryption:
@@ -56,7 +55,9 @@ DOTFILES_REPO="${OMAVM_DOTFILES_REPO:-$HOME/dotfiles}"
 # wherever yours came from rather than at a path on this machine.
 DOTFILES_ORIGIN="${OMAVM_DOTFILES_ORIGIN:-$(git -C "$DOTFILES_REPO" remote get-url origin 2>/dev/null || true)}"
 
-SSH_OPTS=(-p "$SSH_PORT" -o ConnectTimeout=3 -o StrictHostKeyChecking=no
+# Every boot gets a new host key from the snapshot's point of view, and the
+# address comes from DHCP, so pinning either would only produce warnings.
+SSH_OPTS=(-o ConnectTimeout=3 -o StrictHostKeyChecking=no
   -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
 # Session env for tools that need the guest's Wayland/Hyprland session
 GUEST_ENV="export XDG_RUNTIME_DIR=/run/user/$GUEST_UID WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE=\$(ls /run/user/$GUEST_UID/hypr | head -1);"
@@ -66,6 +67,10 @@ usage() {
 omavm - drive the disposable Omarchy test VM
 
 Usage: omavm <command> [args]
+
+Every VM is a libvirt domain ("omavm", or "omavm-<name>" with OMAVM_NAME) on
+qemu:///system. It runs without a window; "omavm view" or the bar's VM panel
+opens its screen.
 
 Building the machine (rarely; "fresh" is already built):
   install              Install Omarchy from scratch, unattended, onto a blank
@@ -78,26 +83,32 @@ Building the machine (rarely; "fresh" is already built):
   dotfiles             Re-copy the host dotfiles into the guest and stow them.
 
 VM lifecycle:
-  boot [snapshot]      Boot a clean VM from a snapshot (default: fresh).
-                       Discards the current active disk, starts QEMU in a
-                       systemd user unit (survives the calling session) and
-                       waits until SSH answers.
-  resume               Boot again from the existing active disk instead of a
-                       snapshot (continue where a stopped VM left off).
-  stop                 Power the VM off cleanly (SSH poweroff, falls back to
-                       stopping the systemd unit).
-  status               Show unit state, SSH reachability and whether a
-                       Hyprland session is running in the guest.
+  boot [snapshot]      Boot a clean VM from a snapshot (default: fresh). Its
+                       disk is a thin overlay on the snapshot, so this copies
+                       nothing; a previous disk of the same VM is discarded.
+                       Waits until SSH answers.
+  create <name> [snapshot]
+                       The same for a VM named omavm-<name>, printing
+                       "<domain><TAB><ip>" for scripts to read.
+  resume               Start the VM again from its existing disk (continue
+                       where a stopped VM left off).
+  stop                 Shut the VM down cleanly (ACPI, then forced after 30s).
+                       The disk stays for "resume".
+  destroy              Stop the VM and remove its domain and disk.
+  status               Show state, address, SSH and whether a Hyprland
+                       session is running in the guest.
 
-Snapshots (in vm-saves/ in the omavm repository):
+Snapshots (in /var/lib/libvirt/images/omavm/snapshots):
   save <name> [--force]
-                       Save the active disk as a snapshot. Refuses while the
-                       VM is running: stop it first for a consistent copy.
-                       Refuses to overwrite an existing snapshot without
-                       --force, so "fresh" cannot go by accident.
-  list                 List available snapshots.
+                       Save the VM's disk as a standalone snapshot. Refuses
+                       while the VM is running: stop it first for a
+                       consistent copy. Refuses to overwrite an existing
+                       snapshot without --force, so "fresh" cannot go by
+                       accident, and refuses outright while a VM's disk
+                       still builds on it.
+  list                 List snapshots and omavm VMs.
 
-Working in the guest (root over SSH on localhost:2222):
+Working in the guest (root over SSH on the VM's address):
   ssh [cmd...]         Open a shell in the VM, or run a single command.
   user <cmd...>        Run a command in the guest as the regular user, with
                        the Wayland/Hyprland session environment loaded.
@@ -109,17 +120,17 @@ Working in the guest (root over SSH on localhost:2222):
                        can only ask the agent to sign, and only while this
                        command runs. Needs 1Password unlocked.
                          omavm agent git -C ~/dotfiles push
+  ip                   Print the VM's address.
 
 Desktop in the guest:
+  view                 Open the VM's screen in virt-viewer. Closing the
+                       viewer leaves the VM running.
   shot [file]          Take a screenshot of the guest desktop with grim and
                        write it to <file> (default: ./vm-shot.png). Needs SSH
                        and a running Hyprland session in the guest.
-  screendump [file]    Photograph the guest's screen through QEMU itself
+  screendump [file]    Photograph the guest's screen through libvirt
                        (default: ./vm-screen.png). Works without SSH and
-                       without a desktop in the guest, and does not care which
-                       workspace the QEMU window is on. Needs the VM to run
-                       without GPU acceleration, which "install" does by
-                       itself; elsewhere: OMARCHY_VM_GL=0 omavm boot
+                       without a desktop in the guest.
   sendkey <key...>     Press keys inside the guest via QEMU, e.g.
                          omavm sendkey ret
                          omavm sendkey ctrl-alt-f2
@@ -132,16 +143,9 @@ Desktop in the guest:
                          omavm qs ipc call your-name.text-transform open
   restart-shell        Restart omarchy-shell in the guest.
   resolution <WxH> [scale]
-                       Set the guest's resolution and resize the QEMU window
-                       to match, so the guest renders pixel for pixel instead
-                       of being squeezed into whatever shape the window has.
-                       Do this before taking screenshots worth keeping:
-                         omavm resolution 1920x1080
-                       The guest takes its mode from the window size once and
-                       never revisits it, so a window that was briefly narrow
-                       leaves it stuck in a portrait mode. The window is left
-                       floating, because only a floating window keeps an
-                       exact size.
+                       Set the guest's resolution for this session, e.g.
+                         omavm resolution 2560x1600
+                       OMAVM_RES sets it from the start (default 1920x1200).
 
 Plugin testing:
   plugin <dir>         Install a local plugin directory into the guest:
@@ -150,167 +154,285 @@ Plugin testing:
                        restarts the shell. Typical loop:
                          omavm boot && omavm plugin ~/Documents/OmarchyPlugins/foo && omavm shot
 
+Settings: OMAVM_NAME, OMAVM_MEM (MB, 8192), OMAVM_CPUS (8), OMAVM_RES.
+
 Notes:
-  - The active disk lives in /var/tmp and does not survive a host reboot;
-    snapshots do. "boot" always starts clean, "resume" continues.
   - The guest has no disk encryption and passwordless sudo, so treat its disk
     as readable by anyone who gets at it: never put a secret in the VM. Use
     "omavm agent" when something in there needs one of your keys.
-  - If SSH does not come up after boot, the guest is usually waiting for
-    input in the QEMU window (a login prompt).
-  - The QEMU window: Ctrl-Alt-F toggles QEMU fullscreen, Ctrl-Alt-G
-    releases a grabbed mouse.
+  - If SSH does not come up after boot, look with "omavm screendump": the
+    guest is usually waiting at a prompt.
 USAGE
 }
 
-vmssh() { ssh "${SSH_OPTS[@]}" root@localhost "$@"; }
+virsh_() { "${VIRSH[@]}" "$@"; }
 
-unit_active() { systemctl --user is-active --quiet "$UNIT"; }
+domain_exists() { virsh_ dominfo "$DOMAIN" >/dev/null 2>&1; }
+domain_running() { [[ $(virsh_ domstate "$DOMAIN" 2>/dev/null) == running ]]; }
+
+# The address the default network's DHCP handed out. Looked up once per run.
+IP=""
+lookup_ip() {
+  virsh_ domifaddr "$DOMAIN" --source lease 2>/dev/null |
+    awk '/ipv4/ { split($4, a, "/"); ip = a[1] } END { print ip }'
+}
 
 require_running() {
-  if ! unit_active; then
-    echo "omavm: the VM is not running (start it with: omavm boot)" >&2
+  if ! domain_running; then
+    echo "omavm: $DOMAIN is not running (start it with: omavm boot)" >&2
+    exit 1
+  fi
+  [[ -n $IP ]] || IP=$(lookup_ip)
+  if [[ -z $IP ]]; then
+    echo "omavm: $DOMAIN has no address yet; it may still be booting." >&2
     exit 1
   fi
 }
 
+vmssh() { ssh "${SSH_OPTS[@]}" "root@$IP" "$@"; }
+
+# The install puts our key on the guest user, not root, so first contact is as
+# the user; cmd_provision then opens the root path the rest of omavm uses.
+usermssh() { ssh "${SSH_OPTS[@]}" "$GUEST_USER@$IP" "$@"; }
+
+# Wait for an address and then for SSH as <login> (root, or the guest user
+# right after an install). Prints dots, and a minute marker on long waits.
 wait_for_ssh() {
-  local waited=0 timeout="${1:-180}"
-  echo -n "Waiting for SSH"
-  until vmssh true 2>/dev/null; do
-    sleep 3
-    waited=$((waited + 3))
-    echo -n "."
+  local login="$1" timeout="${2:-180}" step="${3:-3}" waited=0
+  echo -n "Waiting for SSH" >&2
+  until [[ -n $IP ]] && ssh "${SSH_OPTS[@]}" "$login@$IP" true 2>/dev/null; do
+    sleep "$step"
+    waited=$((waited + step))
+    [[ -n $IP ]] || IP=$(lookup_ip)
+    echo -n "." >&2
+    ((waited % 60 == 0)) && echo -n " ${waited}s" >&2
     if ((waited >= timeout)); then
-      echo
-      echo "omavm: no SSH after ${timeout}s. The guest is probably waiting for" >&2
-      echo "input in the QEMU window (disk password or login prompt)." >&2
+      echo >&2
+      echo "omavm: no SSH after ${timeout}s. Look at the screen with" >&2
+      echo "'omavm screendump' or 'omavm view': it is probably at a prompt." >&2
       exit 1
     fi
   done
-  echo " up after ~${waited}s"
+  echo " up on $IP after ~${waited}s" >&2
+}
+
+# Remove the domain and its disk. The firmware vars go with --nvram.
+remove_domain() {
+  virsh_ destroy "$DOMAIN" >/dev/null 2>&1 || true
+  virsh_ undefine "$DOMAIN" --nvram >/dev/null 2>&1 || true
+  rm -f "$DISK" "$VARS"
+}
+
+# Define and start the domain on an existing disk and vars. Plain virtio video
+# with SPICE: no GPU acceleration, but libvirt can then photograph the screen
+# (screendump), and virt-viewer opens it whenever someone wants to look.
+define_domain() {
+  local extra=("$@")
+  virt-install --connect qemu:///system \
+    --name "$DOMAIN" \
+    --osinfo archlinux \
+    --machine q35 \
+    --memory "$VM_MEM" \
+    --vcpus "$VM_CPUS" \
+    --cpu host-passthrough \
+    --boot "loader=$OVMF_CODE,loader.readonly=yes,loader.type=pflash,nvram=$VARS" \
+    --network network=default,model=virtio \
+    --graphics spice \
+    --video virtio \
+    --xml "./devices/video/model/resolution/@x=${VM_RES%x*}" \
+    --xml "./devices/video/model/resolution/@y=${VM_RES#*x}" \
+    --channel spicevmc \
+    --noautoconsole \
+    "${extra[@]}" >/dev/null
+}
+
+check_host() {
+  if [[ ! -d $IMAGES_DIR || ! -w $IMAGES_DIR ]]; then
+    echo "omavm: $IMAGES_DIR is missing or not writable. Create it once with:" >&2
+    echo "  sudo install -d -o $USER -g libvirt -m 2775 $IMAGES_DIR" >&2
+    exit 1
+  fi
+  # Captured first: grep -q stops reading early, and under pipefail the
+  # SIGPIPE that gives virsh would count as the network being down.
+  local net
+  net=$(virsh_ net-info default 2>/dev/null || true)
+  if [[ ! $net =~ Active:[[:space:]]+yes ]]; then
+    echo "omavm: libvirt's default network is not running:" >&2
+    echo "  sudo virsh net-autostart default && sudo virsh net-start default" >&2
+    exit 1
+  fi
 }
 
 cmd_boot() {
   local snapshot="${1:-fresh}"
-  if unit_active; then
-    echo "omavm: a VM is already running; use it, or 'omavm stop' first." >&2
+  check_host
+  if domain_running; then
+    echo "omavm: $DOMAIN is already running; use it, or 'omavm stop' first." >&2
     exit 1
   fi
-  if [[ ! -d "$VM_DIR/vm-saves/$snapshot" ]]; then
+  if [[ ! -f "$SNAPSHOTS_DIR/$snapshot.qcow2" ]]; then
     echo "omavm: snapshot '$snapshot' not found" >&2
     cmd_list >&2
     exit 1
   fi
-  # Copy the snapshot ourselves instead of via omarchy-vm boot: that path
-  # asks a gum confirm over an existing disk, which exits 0 silently without
-  # a tty, and it cannot pass extra QEMU args through cleanly.
-  cp "$VM_DIR/vm-saves/$snapshot/omarchy-iso-boot.qcow2" "$ACTIVE_DISK"
-  cp "$VM_DIR/vm-saves/$snapshot/OVMF_VARS.4m.fd" "$OVMF_VARS"
-  local extra=(-- -qmp "unix:$QMP_SOCK,server=on,wait=off")
-  [[ -n "$VM_MEM" ]] && extra+=(-m "$VM_MEM")
-  rm -f "$QMP_SOCK"
-  systemd-run --user --unit="${UNIT%.service}" --collect \
-    --setenv=OMARCHY_VM_DISK="$ACTIVE_DISK" \
-    --setenv=OMARCHY_VM_OVMF_VARS="$OVMF_VARS" \
-    --setenv=OMARCHY_VM_SSH_PORT="$SSH_PORT" \
-    --setenv=OMARCHY_VM_GL="${OMARCHY_VM_GL:-1}" \
-    "$VM_BIN/omarchy-iso-boot" --reuse /dev/null "${extra[@]}" >/dev/null
-  echo "Booting snapshot '$snapshot'${VM_MEM:+ with ${VM_MEM}MB RAM} (QEMU window appears on the desktop)"
-  wait_for_ssh
+  remove_domain
+  # The snapshot stays untouched: the VM writes only to its own overlay.
+  qemu-img create -q -f qcow2 -b "$SNAPSHOTS_DIR/$snapshot.qcow2" -F qcow2 "$DISK"
+  cp "$SNAPSHOTS_DIR/$snapshot-vars.fd" "$VARS"
+  define_domain --import --disk "path=$DISK,format=qcow2,bus=virtio"
+  echo "Booting $DOMAIN from snapshot '$snapshot' (${VM_MEM}MB, $VM_CPUS cores, ${VM_RES}, no window)" >&2
+  wait_for_ssh root
+}
+
+cmd_create() {
+  local name="${1:-}"
+  if [[ ! $name =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+    echo "omavm: usage: omavm create <name> [snapshot]   (lowercase, digits, dashes)" >&2
+    exit 1
+  fi
+  OMAVM_NAME="$name" exec "$0" __create "${2:-fresh}"
 }
 
 cmd_resume() {
-  if unit_active; then
-    echo "omavm: a VM is already running." >&2
+  check_host
+  if domain_running; then
+    echo "omavm: $DOMAIN is already running." >&2
     exit 1
   fi
-  if [[ ! -f "$ACTIVE_DISK" ]]; then
-    echo "omavm: no active disk at $ACTIVE_DISK; boot a snapshot instead." >&2
+  if ! domain_exists; then
+    echo "omavm: there is no $DOMAIN to resume; boot a snapshot instead." >&2
     exit 1
   fi
-  local extra=(-- -qmp "unix:$QMP_SOCK,server=on,wait=off")
-  [[ -n "$VM_MEM" ]] && extra+=(-m "$VM_MEM")
-  rm -f "$QMP_SOCK"
-  systemd-run --user --unit="${UNIT%.service}" --collect \
-    --setenv=OMARCHY_VM_DISK="$ACTIVE_DISK" \
-    --setenv=OMARCHY_VM_OVMF_VARS="$OVMF_VARS" \
-    --setenv=OMARCHY_VM_SSH_PORT="$SSH_PORT" \
-    --setenv=OMARCHY_VM_GL="${OMARCHY_VM_GL:-1}" \
-    "$VM_BIN/omarchy-iso-boot" --reuse /dev/null "${extra[@]}" >/dev/null
-  echo "Resuming from the existing active disk"
-  wait_for_ssh
+  virsh_ start "$DOMAIN" >/dev/null
+  echo "Resuming $DOMAIN from its existing disk" >&2
+  wait_for_ssh root
 }
 
 cmd_stop() {
-  if ! unit_active; then
-    echo "omavm: the VM is not running."
+  if ! domain_running; then
+    echo "omavm: $DOMAIN is not running."
     return 0
   fi
-  vmssh poweroff 2>/dev/null || true
+  virsh_ shutdown "$DOMAIN" >/dev/null 2>&1 || true
   local waited=0
-  while unit_active && ((waited < 30)); do
+  while domain_running && ((waited < 30)); do
     sleep 1
     waited=$((waited + 1))
   done
-  if unit_active; then
-    systemctl --user stop "$UNIT"
+  domain_running && virsh_ destroy "$DOMAIN" >/dev/null
+  echo "$DOMAIN stopped"
+}
+
+cmd_destroy() {
+  if ! domain_exists && [[ ! -e $DISK ]]; then
+    echo "omavm: there is no $DOMAIN."
+    return 0
   fi
-  echo "VM stopped"
+  remove_domain
+  echo "$DOMAIN destroyed"
+}
+
+# Open the screen in virt-viewer, in its own unit so it outlives the shell
+# that asked for it. Closing it leaves the VM running.
+cmd_view() {
+  require_running
+  systemd-run --user --collect --quiet --unit="omavm-view$NAME-$(date +%s)" \
+    virt-viewer --connect qemu:///system --attach "$DOMAIN"
+  echo "Opened $DOMAIN in virt-viewer; closing it leaves the VM running."
+}
+
+cmd_ip() {
+  require_running
+  echo "$IP"
 }
 
 cmd_status() {
-  if unit_active; then
-    echo "unit:     running ($UNIT)"
-  else
-    echo "unit:     not running"
+  if ! domain_exists; then
+    echo "domain:   $DOMAIN does not exist (omavm boot creates it)"
+    return 0
   fi
-  if vmssh true 2>/dev/null; then
-    echo "ssh:      reachable (root@localhost:$SSH_PORT)"
+  echo "domain:   $DOMAIN ($(virsh_ domstate "$DOMAIN" 2>/dev/null))"
+  local backing
+  backing=$(qemu-img info -U --output=json "$DISK" 2>/dev/null | jq -r '."backing-filename" // empty')
+  [[ -f $DISK ]] && echo "disk:     $DISK ($(du -h "$DISK" | cut -f1)${backing:+ on $(basename "$backing" .qcow2)})"
+  domain_running || return 0
+  IP=$(lookup_ip)
+  if [[ -n $IP ]] && vmssh true 2>/dev/null; then
+    echo "ssh:      reachable (root@$IP)"
     if vmssh "ls /run/user/$GUEST_UID/hypr >/dev/null 2>&1"; then
       echo "hyprland: session running"
     else
-      echo "hyprland: no session (log in via the QEMU window)"
+      echo "hyprland: no session (look with omavm screendump or omavm view)"
     fi
   else
-    echo "ssh:      not reachable"
+    echo "ssh:      not reachable${IP:+ on $IP}"
   fi
-  [[ -f "$ACTIVE_DISK" ]] && echo "disk:     $ACTIVE_DISK ($(du -h "$ACTIVE_DISK" | cut -f1))"
+  echo "screen:   omavm view"
 }
 
 cmd_save() {
   local name="${1:-}"
   if [[ -z "$name" ]]; then
-    echo "omavm: usage: omavm save <name>" >&2
+    echo "omavm: usage: omavm save <name> [--force]" >&2
     exit 1
   fi
-  if unit_active; then
-    echo "omavm: the VM is running; a snapshot of a live disk is inconsistent." >&2
+  if domain_running; then
+    echo "omavm: $DOMAIN is running; a snapshot of a live disk is inconsistent." >&2
     echo "Stop it first: omavm stop" >&2
     exit 1
   fi
-  # Copy it ourselves rather than through omarchy-vm save: over an existing
-  # snapshot that asks a gum confirm, which without a tty dies on /dev/tty
-  # instead of asking. Overwriting is guarded here instead, explicitly.
-  local dest="$VM_DIR/vm-saves/$name"
-  if [[ -d $dest && ${2:-} != "--force" ]]; then
+  if [[ ! -f $DISK ]]; then
+    echo "omavm: $DOMAIN has no disk to save." >&2
+    exit 1
+  fi
+  local dest="$SNAPSHOTS_DIR/$name.qcow2"
+  if [[ -f $dest && ${2:-} != "--force" ]]; then
     echo "omavm: snapshot '$name' already exists." >&2
     echo "Overwrite it with: omavm save $name --force" >&2
     exit 1
   fi
-  mkdir -p "$dest"
-  cp "$ACTIVE_DISK" "$dest/omarchy-iso-boot.qcow2"
-  cp "$OVMF_VARS" "$dest/OVMF_VARS.4m.fd"
-  echo "Saved snapshot '$name' ($(du -h "$dest/omarchy-iso-boot.qcow2" | cut -f1))"
+  # A disk that builds on the snapshot would be corrupted by overwriting it.
+  # This VM's own disk is fine: it gets a fresh overlay on the new snapshot,
+  # which has exactly the content it was saved from.
+  local disk others=() own=false
+  for disk in "$IMAGES_DIR"/*.qcow2; do
+    [[ -f $disk ]] || continue
+    [[ $(qemu-img info -U --output=json "$disk" 2>/dev/null | jq -r '."backing-filename" // empty') == "$dest" ]] || continue
+    if [[ $disk == "$DISK" ]]; then own=true; else others+=("$(basename "$disk" .qcow2)"); fi
+  done
+  if ((${#others[@]} > 0)); then
+    echo "omavm: these VMs build on snapshot '$name': ${others[*]}" >&2
+    echo "Destroy them first: OMAVM_NAME=<name> omavm destroy" >&2
+    exit 1
+  fi
+  # Flattened into a standalone image, so a snapshot never depends on another.
+  mkdir -p "$SNAPSHOTS_DIR"
+  qemu-img convert -O qcow2 "$DISK" "$dest.part"
+  cp "$VARS" "$SNAPSHOTS_DIR/$name-vars.fd"
+  mv -f "$dest.part" "$dest"
+  chmod 664 "$dest" "$SNAPSHOTS_DIR/$name-vars.fd"
+  if [[ $own == true ]]; then
+    qemu-img create -q -f qcow2 -b "$dest" -F qcow2 "$DISK"
+  fi
+  echo "Saved snapshot '$name' ($(du -h "$dest" | cut -f1))"
 }
 
-cmd_list() { "$VM_BIN/omarchy-vm" list; }
+cmd_list() {
+  echo "Snapshots:"
+  local f
+  for f in "$SNAPSHOTS_DIR"/*.qcow2; do
+    [[ -f $f ]] && printf '  %-20s %s\n' "$(basename "$f" .qcow2)" "$(du -h "$f" | cut -f1)"
+  done
+  echo "VMs:"
+  virsh_ list --all --name 2>/dev/null | grep -E '^omavm(-|$)' | while read -r d; do
+    printf '  %-20s %s\n' "$d" "$(virsh_ domstate "$d" 2>/dev/null)"
+  done
+}
 
 cmd_ssh() {
   require_running
   if (($# == 0)); then
-    # Interactive shell wants a tty and host-key prompts are fine there
-    exec ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@localhost
+    exec ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "root@$IP"
   fi
   vmssh "$@"
 }
@@ -334,8 +456,7 @@ cmd_push() {
     echo "omavm: usage: omavm push <local-path> [guest-dest]" >&2
     exit 1
   fi
-  scp -r -P "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o LogLevel=ERROR "$src" "root@localhost:$dest"
+  scp -r "${SSH_OPTS[@]}" "$src" "root@$IP:$dest"
 }
 
 cmd_pull() {
@@ -345,8 +466,7 @@ cmd_pull() {
     echo "omavm: usage: omavm pull <guest-path> [local-dest]" >&2
     exit 1
   fi
-  scp -r -P "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o LogLevel=ERROR "root@localhost:$src" "$dest"
+  scp -r "${SSH_OPTS[@]}" "root@$IP:$src" "$dest"
 }
 
 cmd_shot() {
@@ -550,8 +670,9 @@ EOF
 }
 
 cmd_install() {
-  if unit_active; then
-    echo "omavm: a VM is already running; stop it first (omavm stop)." >&2
+  check_host
+  if domain_running; then
+    echo "omavm: $DOMAIN is running; stop it first (omavm stop)." >&2
     exit 1
   fi
   if [[ ! -f "$ISO" ]]; then
@@ -559,71 +680,41 @@ cmd_install() {
     echo "Download one from https://iso.omarchy.org/ or set OMAVM_ISO." >&2
     exit 1
   fi
-  for tool in mkfs.vfat mcopy jq openssl; do
+  for tool in mkfs.vfat mcopy jq openssl virt-install; do
     if ! command -v "$tool" >/dev/null; then
       echo "omavm: '$tool' is missing (mcopy comes from the mtools package)." >&2
       exit 1
     fi
   done
 
-  local cidata="/var/tmp/omavm-cidata.img"
+  # In libvirt's images directory too: the qemu libvirt starts must read the
+  # ISO and the cidata drive as well as the disk.
+  local iso="$IMAGES_DIR/$(basename "$ISO")" cidata="$IMAGES_DIR/$DOMAIN-cidata.img"
+  [[ -f $iso ]] || cp "$ISO" "$iso"
   echo "Building the cidata drive (unattended, no disk encryption)"
   build_cidata "$cidata"
 
   echo "Creating a blank 40G disk and booting $(basename "$ISO")"
-  rm -f "$QMP_SOCK"
-  rm -f "$ACTIVE_DISK"
-  qemu-img create -f qcow2 "$ACTIVE_DISK" 40G >/dev/null
-  cp /usr/share/edk2/x64/OVMF_VARS.4m.fd "$OVMF_VARS"
-
-  # The blank disk is bootindex=1 and falls through to the ISO; once installed
+  remove_domain
+  qemu-img create -q -f qcow2 "$DISK" 40G
+  cp /usr/share/edk2/x64/OVMF_VARS.4m.fd "$VARS"
+  # The blank disk boots first and falls through to the ISO; once installed
   # the same disk boots the real system, so no boot-order change is needed.
-  # No GL during the install: the installer needs no GPU, and without it QEMU
-  # keeps a framebuffer, so "omavm screendump" can show how far it has got.
-  # That matters here because there is no SSH to ask until the very end.
-  systemd-run --user --unit="${UNIT%.service}" --collect \
-    --setenv=OMARCHY_VM_DISK="$ACTIVE_DISK" \
-    --setenv=OMARCHY_VM_OVMF_VARS="$OVMF_VARS" \
-    --setenv=OMARCHY_VM_SSH_PORT="$SSH_PORT" \
-    --setenv=OMARCHY_VM_GL=0 \
-    "$VM_BIN/omarchy-iso-boot" --reuse "$ISO" \
-    -- -drive "file=$cidata,format=raw,if=none,id=cidata" \
-    -device usb-storage,drive=cidata \
-    -qmp "unix:$QMP_SOCK,server=on,wait=off" >/dev/null
+  define_domain \
+    --disk "path=$DISK,format=qcow2,bus=virtio,boot.order=1" \
+    --disk "path=$iso,device=cdrom,bus=sata,readonly=on,boot.order=2" \
+    --disk "path=$cidata,format=raw,bus=usb,readonly=on"
 
-  echo "Installing. This takes 15-30 minutes; the QEMU window shows progress."
+  echo "Installing. This takes 15-30 minutes; 'omavm view' shows progress."
   echo "The guest reboots into the installed system on its own, and SSH"
   echo "answering is how we know it got there."
-  wait_for_ssh_as_user 3600
+  wait_for_ssh "$GUEST_USER" 3600 10
 
   cmd_provision
+  rm -f "$cidata"
   echo
   echo "Done. Save it as the clean snapshot with:"
-  echo "  omavm stop && omavm save fresh"
-}
-
-# The install puts our key on the guest user, not root, so first contact is as
-# the user; cmd_provision then opens the root path the rest of omavm uses.
-usermssh() {
-  ssh "${SSH_OPTS[@]}" "$GUEST_USER@localhost" "$@"
-}
-
-wait_for_ssh_as_user() {
-  local waited=0 timeout="${1:-180}"
-  echo -n "Waiting for the installed system"
-  until usermssh true 2>/dev/null; do
-    sleep 10
-    waited=$((waited + 10))
-    ((waited % 60 == 0)) && echo -n " ${waited}s"
-    echo -n "."
-    if ((waited >= timeout)); then
-      echo
-      echo "omavm: still no SSH after ${timeout}s. Check the QEMU window: the" >&2
-      echo "install may have stopped on a prompt." >&2
-      exit 1
-    fi
-  done
-  echo " up after ~${waited}s"
+  echo "  omavm stop && omavm save fresh --force"
 }
 
 # Everything that turns a stock install into the test machine we want. Split
@@ -745,53 +836,26 @@ cmd_agent() {
     echo "Unlock 1Password and try again." >&2
     exit 1
   fi
-  local opts=(-p "$SSH_PORT" -A -o StrictHostKeyChecking=no
-    -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+  local opts=(-A -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
   if (($# == 0)); then
-    SSH_AUTH_SOCK="$AGENT_SOCK" exec ssh "${opts[@]}" "$GUEST_USER@localhost"
+    SSH_AUTH_SOCK="$AGENT_SOCK" exec ssh "${opts[@]}" "$GUEST_USER@$IP"
   fi
-  SSH_AUTH_SOCK="$AGENT_SOCK" ssh "${opts[@]}" "$GUEST_USER@localhost" "$@"
+  SSH_AUTH_SOCK="$AGENT_SOCK" ssh "${opts[@]}" "$GUEST_USER@$IP" "$@"
 }
 
-# Talk to QEMU's QMP socket: send each JSON command on its own line and print
-# the replies. QMP needs a capabilities handshake before it accepts anything.
-qmp() {
-  if [[ ! -S "$QMP_SOCK" ]]; then
-    echo "omavm: no QMP socket at $QMP_SOCK." >&2
-    echo "It is created by boot/resume/install; a VM started another way lacks it." >&2
-    exit 1
-  fi
-  local cmds=("$@")
-  {
-    printf '%s\n' '{"execute":"qmp_capabilities"}'
-    printf '%s\n' "${cmds[@]}"
-    # QEMU answers asynchronously, so hold the socket open briefly.
-    sleep 1
-  } | socat - "UNIX-CONNECT:$QMP_SOCK" 2>/dev/null
-}
-
-# Photograph the guest's screen through QEMU itself. Unlike "shot" this needs
-# no SSH and no Wayland session in the guest, and unlike grabbing the QEMU
-# window it does not care which workspace that window is on or whether it is
-# visible at all. This is the way to see an install, a boot prompt or a crash.
+# Photograph the guest's screen through libvirt. Unlike "shot" this needs no
+# SSH and no Wayland session in the guest, so it is the way to see an
+# install, a boot prompt or a crash.
 cmd_screendump() {
-  require_running
-  local out="${1:-vm-screen.png}" ppm
-  ppm=$(mktemp --suffix=.ppm)
-  # QEMU writes the file itself, so it must be a path QEMU can reach; it runs
-  # as us, so a temp file is fine.
-  qmp "$(jq -cn --arg f "$ppm" '{execute:"screendump",arguments:{filename:$f}}')" >/dev/null
-  if [[ ! -s "$ppm" ]]; then
-    rm -f "$ppm"
-    echo "omavm: QEMU has no framebuffer to photograph." >&2
-    echo "A normal boot runs with GPU acceleration, and then only the guest" >&2
-    echo "itself can see its screen: use 'omavm shot' over SSH instead. To get" >&2
-    echo "a screendump anyway, boot with GL off:" >&2
-    echo "  OMARCHY_VM_GL=0 omavm boot" >&2
+  if ! domain_running; then
+    echo "omavm: $DOMAIN is not running." >&2
     exit 1
   fi
-  magick "$ppm" "$out"
-  rm -f "$ppm"
+  local out="${1:-vm-screen.png}" raw
+  raw=$(mktemp)
+  virsh_ screenshot "$DOMAIN" "$raw" >/dev/null
+  magick "$raw" "$out"
+  rm -f "$raw"
   echo "$out"
 }
 
@@ -801,26 +865,28 @@ cmd_screendump() {
 # Key names are QEMU's (ret, esc, spc, up, down, a-z, 0-9), and a
 # dash-separated combination is sent as a chord: omavm sendkey ctrl-alt-f2
 cmd_sendkey() {
-  require_running
+  if ! domain_running; then
+    echo "omavm: $DOMAIN is not running." >&2
+    exit 1
+  fi
   if (($# == 0)); then
     echo "omavm: usage: omavm sendkey <key> [key...]   (e.g. ret, ctrl-alt-f2)" >&2
     exit 1
   fi
   local key
   for key in "$@"; do
-    qmp "$(jq -cn --arg k "$key" '
-      {execute:"send-key",arguments:{keys:[$k|split("-")[]|{type:"qcode",data:.}]}}')" >/dev/null
+    if [[ ! $key =~ ^[a-z0-9_-]+$ ]]; then
+      echo "omavm: '$key' is not a QEMU key name" >&2
+      exit 1
+    fi
+    virsh_ qemu-monitor-command "$DOMAIN" --hmp "sendkey $key" >/dev/null
     sleep 0.2
   done
   echo "Sent: $*"
 }
 
-# Match the guest's resolution to the QEMU window, so it renders pixel for
-# pixel. The guest picks its mode up from the window size at the moment it
-# first detects one and then never revisits it, so a window that was briefly
-# narrow leaves the guest in a portrait mode that gets squeezed into whatever
-# shape the window has afterwards. Everything then looks soft, and a
-# screenshot is worse than soft: it is the wrong aspect ratio.
+# Set the guest's mode for this session. The size it boots with comes from
+# OMAVM_RES; this changes it on a running VM.
 cmd_resolution() {
   require_running
   local spec="${1:-}" guest_scale="${2:-1}"
@@ -829,49 +895,14 @@ cmd_resolution() {
     echo "e.g. omavm resolution 1920x1080" >&2
     exit 1
   fi
-  local width="${BASH_REMATCH[1]}" height="${BASH_REMATCH[2]}"
-
-  if ! command -v hyprctl >/dev/null || ! hyprctl -j monitors >/dev/null 2>&1; then
-    echo "omavm: no Hyprland on this host, so the window cannot be resized." >&2
-    echo "Setting the guest only; size the QEMU window yourself to $((width / guest_scale))x$((height / guest_scale))." >&2
-  fi
-
-  # The guest's output name, rather than assuming Virtual-1.
   local output
   output=$(vmssh "$GUEST_ENV hyprctl -j monitors" 2>/dev/null | jq -r '.[0].name // empty')
   if [[ -z $output ]]; then
     echo "omavm: no Hyprland session in the guest yet; boot it first." >&2
     exit 1
   fi
-
-  echo "Guest $output -> ${width}x${height} @ scale $guest_scale"
-  vmssh "$GUEST_ENV hyprctl eval 'hl.monitor({ output = \"$output\", mode = \"${width}x${height}@60\", position = \"0x0\", scale = $guest_scale })'" >/dev/null
-
-  # Hyprland sizes windows in logical pixels, so a scaled host display needs
-  # the request divided by its scale to land on the physical size we asked the
-  # guest for.
-  local win host_scale logical_w logical_h
-  win=$(hyprctl -j clients 2>/dev/null |
-    jq -r '.[] | select(.class == "qemu-system-x86_64") | .address' | head -1)
-  if [[ -z $win ]]; then
-    echo "omavm: QEMU window not found on this host; guest resized only." >&2
-    return 0
-  fi
-  host_scale=$(hyprctl -j monitors 2>/dev/null | jq -r '.[0].scale // 1')
-  logical_w=$(awk -v w="$width" -v s="$host_scale" 'BEGIN { printf "%d", w / s }')
-  logical_h=$(awk -v h="$height" -v s="$host_scale" 'BEGIN { printf "%d", h / s }')
-
-  # Only a floating window can be given an exact size; a tiled one is owned by
-  # the layout. Float it if it is not already.
-  if [[ $(hyprctl -j clients | jq -r --arg a "$win" '.[] | select(.address == $a) | .floating') != "true" ]]; then
-    hyprctl dispatch "hl.dsp.window.float({ window = \"address:$win\" })" >/dev/null
-    sleep 1
-  fi
-  hyprctl dispatch "hl.dsp.window.resize({ x = $logical_w, y = $logical_h, relative = false, window = \"address:$win\" })" >/dev/null
-  sleep 1
-  hyprctl dispatch "hl.dsp.window.center({ window = \"address:$win\" })" >/dev/null
-  echo "QEMU window -> ${logical_w}x${logical_h} logical (${width}x${height} physical at host scale $host_scale), floating"
-  echo "It is floating now so the size sticks; SUPER+V tiles it back."
+  vmssh "$GUEST_ENV hyprctl eval 'hl.monitor({ output = \"$output\", mode = \"${spec}@60\", position = \"0x0\", scale = $guest_scale })'" >/dev/null
+  echo "Guest $output -> $spec @ scale $guest_scale"
 }
 
 case "${1:-}" in
@@ -880,8 +911,12 @@ case "${1:-}" in
   dotfiles) shift; cmd_dotfiles "$@" ;;
   agent) shift; cmd_agent "$@" ;;
   boot) shift; cmd_boot "$@" ;;
+  create) shift; cmd_create "$@" ;;
+  # What "create" runs once OMAVM_NAME is set: boot, then the line scripts read.
+  __create) shift; cmd_boot "$@"; printf '%s\t%s\n' "$DOMAIN" "$IP" ;;
   resume) shift; cmd_resume "$@" ;;
   stop) shift; cmd_stop "$@" ;;
+  destroy) shift; cmd_destroy "$@" ;;
   status) shift; cmd_status "$@" ;;
   save) shift; cmd_save "$@" ;;
   list) shift; cmd_list "$@" ;;
@@ -889,8 +924,10 @@ case "${1:-}" in
   user) shift; cmd_user "$@" ;;
   push) shift; cmd_push "$@" ;;
   pull) shift; cmd_pull "$@" ;;
+  ip) shift; cmd_ip "$@" ;;
   shot) shift; cmd_shot "$@" ;;
   screendump) shift; cmd_screendump "$@" ;;
+  view) shift; cmd_view "$@" ;;
   sendkey) shift; cmd_sendkey "$@" ;;
   hypr) shift; cmd_hypr "$@" ;;
   qs) shift; cmd_qs "$@" ;;
