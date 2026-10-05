@@ -92,7 +92,8 @@ VM lifecycle:
                        "<domain><TAB><ip>" for scripts to read.
   resume               Start the VM again from its existing disk (continue
                        where a stopped VM left off).
-  stop                 Shut the VM down cleanly (ACPI, then forced after 30s).
+  stop                 Shut the VM down cleanly (poweroff over SSH, ACPI
+                       without SSH, then forced after 30s).
                        The disk stays for "resume".
   destroy              Stop the VM and remove its domain and disk.
   status               Show state, address, SSH and whether a Hyprland
@@ -313,13 +314,24 @@ cmd_stop() {
     echo "omavm: $DOMAIN is not running."
     return 0
   fi
-  virsh_ shutdown "$DOMAIN" >/dev/null 2>&1 || true
+  # The ACPI shutdown is a press of the power button, and Omarchy answers that
+  # with its system menu (logind ignores the key, Hyprland binds it), so on its
+  # own it never powers the guest off. Ask over SSH first; ACPI is left for a
+  # guest without SSH, still installing or at a prompt.
+  IP=$(lookup_ip)
+  if ! { [[ -n $IP ]] && vmssh "systemctl poweroff" >/dev/null 2>&1; }; then
+    virsh_ shutdown "$DOMAIN" >/dev/null 2>&1 || true
+  fi
   local waited=0
   while domain_running && ((waited < 30)); do
     sleep 1
     waited=$((waited + 1))
   done
-  domain_running && virsh_ destroy "$DOMAIN" >/dev/null
+  if domain_running; then
+    virsh_ destroy "$DOMAIN" >/dev/null
+    echo "$DOMAIN did not shut down within 30s; forced it off"
+    return 0
+  fi
   echo "$DOMAIN stopped"
 }
 
