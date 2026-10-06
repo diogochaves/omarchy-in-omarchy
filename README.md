@@ -45,7 +45,7 @@ Two files are mandatory on that drive, `user_configuration.json` and `user_crede
 
 That trade is the whole point here. A test VM that stops for a passphrase cannot be started from a script and cannot be left to install itself. What you give up is confidentiality of the guest disk, so nothing secret may live on it (see below).
 
-**The answer file names no kernel**, so the ISO installs its own: stock `linux` up to 4.0.3, `linux-omarchy` from 4.0.4. Naming one the ISO does not carry fails late and confusingly. 4.0.4 installs everything, then stops at "Validating boot setup" with `linux (…) has no kernel headers`, because it insists on headers and ships them for its own kernel only. `OMAVM_KERNEL` still names one explicitly, for an ISO that carries it and its headers.
+**The answer file names no kernel**, so each ISO installs its own: it only carries headers for that one, and from 4.0.4 the installer refuses a kernel without them.
 
 ### Two things a plain install does not give you
 
