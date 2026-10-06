@@ -19,7 +19,7 @@ omavm stop
 
 ## Requirements
 
-Arch or Omarchy on the host, with libvirt and an Omarchy ISO from [iso.omarchy.org](https://iso.omarchy.org). KVM, 8 cores, 8 GB RAM and 40 GB of disk go to the guest by default (`OMAVM_CPUS`, `OMAVM_MEM`).
+Arch or Omarchy on the host, with libvirt and an Omarchy ISO from [iso.omarchy.org](https://iso.omarchy.org): `omavm install` takes the newest `omarchy-*.iso` in `~/Downloads`, or the one `OMAVM_ISO` points at. KVM, 8 cores, 8 GB RAM and 40 GB of disk go to the guest by default (`OMAVM_CPUS`, `OMAVM_MEM`).
 
 Setting up libvirt takes one round of sudo:
 
@@ -44,6 +44,8 @@ Two files are mandatory on that drive, `user_configuration.json` and `user_crede
 **Leaving out the `disk_encryption` block is what removes the passphrase prompt.** Encryption is configured entirely by that block inside `user_configuration.json`; the separate `user_encrypt_installation.txt` flag only has to agree with it. An encrypted install is never fully unattended, because the LUKS prompt still needs someone at the first boot.
 
 That trade is the whole point here. A test VM that stops for a passphrase cannot be started from a script and cannot be left to install itself. What you give up is confidentiality of the guest disk, so nothing secret may live on it (see below).
+
+**The answer file names no kernel**, so each ISO installs its own: it only carries headers for that one, and from 4.0.4 the installer refuses a kernel without them.
 
 ### Two things a plain install does not give you
 

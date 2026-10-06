@@ -36,7 +36,9 @@ SHELL_QML="/usr/share/omarchy/shell/shell.qml"
 # it is a throwaway machine that must boot straight into Hyprland without
 # anyone typing a passphrase. Nothing secret may live on that disk; secrets
 # reach the guest over a forwarded SSH agent instead (see cmd_agent).
-ISO="${OMAVM_ISO:-$HOME/Downloads/omarchy-4.0.3.iso}"
+# Empty means the newest omarchy-*.iso in ~/Downloads (see find_iso), so a new
+# release needs no change here.
+ISO="${OMAVM_ISO:-}"
 GUEST_PASSWORD="${OMAVM_PASSWORD:-omarchy}"
 GUEST_HOSTNAME="${OMAVM_HOSTNAME:-omarchy-vm}"
 GUEST_TIMEZONE="${OMAVM_TIMEZONE:-Europe/Amsterdam}"
@@ -74,9 +76,11 @@ opens its screen.
 
 Building the machine (rarely; "fresh" is already built):
   install              Install Omarchy from scratch, unattended, onto a blank
-                       disk. Uses a cidata drive so nothing has to be typed,
-                       and installs WITHOUT disk encryption so the VM boots
-                       straight into Hyprland. Runs provision afterwards.
+                       disk, from the newest omarchy-*.iso in ~/Downloads
+                       (or OMAVM_ISO). Uses a cidata drive so nothing has to
+                       be typed, and installs WITHOUT disk encryption so the
+                       VM boots straight into Hyprland. Runs provision
+                       afterwards.
                        Save the result with: omavm stop && omavm save fresh
   provision            Re-run the post-install steps on a running VM: root SSH
                        key, passwordless sudo, stow, dotfiles.
@@ -579,7 +583,7 @@ EOF
             "efi_binary": "limine_x64.efi",
             "enable_fallback": true
         },
-        "storage": { "kernel": "linux" }
+        "storage": {}
     },
     "disk_config": {
         "config_type": "default_layout",
@@ -624,7 +628,6 @@ EOF
         ]
     },
     "hostname": "$GUEST_HOSTNAME",
-    "kernels": [ "linux" ],
     "network_config": { "type": "iso" },
     "ntp": true,
     "parallel_downloads": 8,
@@ -669,11 +672,24 @@ EOF
   rm -rf "$dir"
 }
 
+# The highest version among the Omarchy ISOs in ~/Downloads, or nothing.
+find_iso() {
+  find "$HOME/Downloads" -maxdepth 1 -name 'omarchy-*.iso' 2>/dev/null | sort -V | tail -n 1
+}
+
 cmd_install() {
   check_host
   if domain_running; then
     echo "omavm: $DOMAIN is running; stop it first (omavm stop)." >&2
     exit 1
+  fi
+  if [[ -z $ISO ]]; then
+    ISO=$(find_iso) || true
+    if [[ -z $ISO ]]; then
+      echo "omavm: no omarchy-*.iso in ~/Downloads" >&2
+      echo "Download one from https://iso.omarchy.org/ or set OMAVM_ISO." >&2
+      exit 1
+    fi
   fi
   if [[ ! -f "$ISO" ]]; then
     echo "omavm: ISO not found at $ISO" >&2
