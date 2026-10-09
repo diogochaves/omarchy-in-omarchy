@@ -449,7 +449,10 @@ cmd_user() {
   fi
   # --preserve-environment keeps root's HOME, which makes every ~ in the
   # command point at /root; -w passes only the session vars we actually want.
-  vmssh "$GUEST_ENV runuser -u $GUEST_USER \
+  # runuser keeps the working directory, and root's is /root, which the user
+  # cannot read: anything that looks at its cwd (find -exec ... +, say) fails.
+  # So start in the user's home, as "omavm agent" does.
+  vmssh "cd ~$GUEST_USER && $GUEST_ENV runuser -u $GUEST_USER \
     -w XDG_RUNTIME_DIR,WAYLAND_DISPLAY,HYPRLAND_INSTANCE_SIGNATURE -- bash -lc $(printf '%q' "$*")"
 }
 
