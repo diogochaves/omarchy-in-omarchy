@@ -15,7 +15,7 @@ Everything goes through **`omavm`**. Start with `omavm --help`; that is the comp
 |---|---|
 | CLI | `omavm` (install, provision, dotfiles, boot, create, resume, stop, destroy, status, save, list, ssh, user, agent, push, pull, ip, shot, screendump, view, sendkey, hypr, qs, restart-shell, resolution, plugin) |
 | VM | a libvirt domain on `qemu:///system`: `omavm`, or `omavm-<name>` with `OMAVM_NAME` |
-| Snapshot | `fresh`: Omarchy with no disk encryption, autologin into Hyprland, sshd on, passwordless sudo, screensaver off and screen kept awake, dotfiles stowed |
+| Snapshot | `fresh`: Omarchy with no disk encryption, autologin into Hyprland, sshd on, passwordless sudo, screensaver off and screen kept awake, dotfiles stowed when the host has a dotfiles repo |
 | Disks | `/var/lib/libvirt/images/omavm/`: snapshots in `snapshots/`, each VM a thin overlay on its snapshot |
 | SSH | `root@<ip>` with key auth; the address comes from libvirt's DHCP (`omavm ip`) |
 | Specs | KVM, 8 cores, 8 GB RAM, 40 GB disk, 1920x1200, Hyprland with Quattro (lua config) |
@@ -68,7 +68,7 @@ The agent has to be unlocked on the host, otherwise omavm reports that it offers
 
 ## Rebuilding the snapshot
 
-`omavm install` does a full unattended install from the ISO. It builds a cidata drive (the cloud-init `NoCloud` convention: the Omarchy installer takes its answers from a drive labelled `CIDATA` and skips the wizard) with no `disk_encryption` block, waits for the guest to reboot into the installed system on its own, and then runs `omavm provision`: root key, passwordless sudo, idle toggles, stow and the dotfiles. Needs `mtools` on the host for `mcopy`.
+`omavm install` does a full unattended install from the ISO. It builds a cidata drive (the cloud-init `NoCloud` convention: the Omarchy installer takes its answers from a drive labelled `CIDATA` and skips the wizard) with no `disk_encryption` block, waits for the guest to reboot into the installed system on its own, and then runs `omavm provision`: root key, passwordless sudo, idle toggles, a package database sync, and stow plus the dotfiles (skipped when `~/dotfiles`, or `OMAVM_DOTFILES_REPO`, is not a git repo). Needs `mtools` on the host for `mcopy`.
 
 ```bash
 omavm install
