@@ -234,8 +234,17 @@ remove_domain() {
 # Define and start the domain on an existing disk and vars. Plain virtio video
 # with SPICE: no GPU acceleration, but libvirt can then photograph the screen
 # (screendump), and virt-viewer opens it whenever someone wants to look.
+#
+# OMAVM_GL=1 trades that for GPU acceleration (virgl): egl-headless renders
+# the guest's OpenGL on a host render node (OMAVM_RENDERNODE, or libvirt's
+# pick), still without a window. SPICE stays first, because virt-viewer only
+# looks at the first display, and screendump falls back to it.
 define_domain() {
-  local extra=("$@")
+  local extra=("$@") gfx=(--graphics spice --video virtio)
+  if [[ -n ${OMAVM_GL:-} ]]; then
+    gfx=(--video "virtio,accel3d=yes" --graphics spice
+      --graphics "egl-headless${OMAVM_RENDERNODE:+,gl.rendernode=$OMAVM_RENDERNODE}")
+  fi
   virt-install --connect qemu:///system \
     --name "$DOMAIN" \
     --osinfo archlinux \
@@ -245,8 +254,7 @@ define_domain() {
     --cpu host-passthrough \
     --boot "loader=$OVMF_CODE,loader.readonly=yes,loader.type=pflash,nvram=$VARS" \
     --network network=default,model=virtio \
-    --graphics spice \
-    --video virtio \
+    "${gfx[@]}" \
     --xml "./devices/video/model/resolution/@x=${VM_RES%x*}" \
     --xml "./devices/video/model/resolution/@y=${VM_RES#*x}" \
     --channel spicevmc \
@@ -922,9 +930,19 @@ cmd_screendump() {
     echo "omavm: $DOMAIN is not running." >&2
     exit 1
   fi
-  local out="${1:-vm-screen.png}" raw
+  local out="${1:-vm-screen.png}" raw err uri
   raw=$(mktemp)
-  virsh_ screenshot "$DOMAIN" "$raw" >/dev/null
+  # With OMAVM_GL the guest renders on the host GPU and QEMU has no surface
+  # for libvirt to photograph, but SPICE still gets every frame: ask it.
+  if ! err=$(virsh_ screenshot "$DOMAIN" "$raw" 2>&1 >/dev/null); then
+    uri=$(virsh_ domdisplay "$DOMAIN" 2>/dev/null) || true
+    if [[ $err != *"no surface"* || $uri != spice://* ]] || ! command -v spicy-screenshot >/dev/null ||
+      ! timeout 20 spicy-screenshot --uri="$uri" -o "$raw" >/dev/null 2>&1; then
+      echo "omavm: ${err:-no screenshot}" >&2
+      rm -f "$raw"
+      exit 1
+    fi
+  fi
   magick "$raw" "$out"
   rm -f "$raw"
   echo "$out"
